@@ -220,11 +220,14 @@ function parseFlags(input) {
     m = p.match(/^--recipe=(\d+)$/i);
     if (m) { flags.doFuse = true; flags.recipeIndex = parseInt(m[1], 10); continue; }
     if (/^--recipe$/i.test(p) && parts[i + 1] && /^\d+$/.test(parts[i + 1])) { flags.doFuse = true; flags.recipeIndex = parseInt(parts[i + 1], 10); i += 1; continue; }
-    const mRank = p.match(/^--(?:fuse-rank)=(\d+)$/i)?.[1] || (p.match(/^--fuse-rank$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
+    let mTmp = p.match(/^--(?:fuse-rank)=(\d+)$/i);
+    const mRank = (mTmp && mTmp[1]) || (p.match(/^--fuse-rank$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
     if (mRank) { flags.fuseRankLimit = parseInt(mRank, 10); continue; }
-    const mDepthAsRank = p.match(/^--(?:depth)=(\d+)$/i)?.[1] || (p.match(/^--depth$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
+    mTmp = p.match(/^--(?:depth)=(\d+)$/i);
+    const mDepthAsRank = (mTmp && mTmp[1]) || (p.match(/^--depth$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
     if (mDepthAsRank) { flags.fuseRankLimit = parseInt(mDepthAsRank, 10); continue; }
-    const mStore = p.match(/^--store=(\d+)$/i)?.[1] || (p.match(/^--store$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
+    mTmp = p.match(/^--store=(\d+)$/i);
+    const mStore = (mTmp && mTmp[1]) || (p.match(/^--store$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
     if (mStore) { flags.storeLevel = Math.max(1, Math.min(5, parseInt(mStore, 10))); continue; }
     kept.push(p);
   }
@@ -528,35 +531,68 @@ function summarizeItem(item) {
 
 function sortRecipes(recipes) {
   return [...(recipes || [])].sort((a, b) => {
-    const ra = (a.ingredients || []).map((x) => x.rank || 0);
-    const rb = (b.ingredients || []).map((x) => x.rank || 0);
+    const ia = (a.ingredients || []);
+    const ib = (b.ingredients || []);
+    const ra = ia.map((x) => x && x.rank ? x.rank : 0);
+    const rb = ib.map((x) => x && x.rank ? x.rank : 0);
     const maxA = Math.max(...ra, 0);
     const maxB = Math.max(...rb, 0);
     if (maxA !== maxB) return maxA - maxB;
     const sumA = ra.reduce((p, c) => p + c, 0);
     const sumB = rb.reduce((p, c) => p + c, 0);
     if (sumA !== sumB) return sumA - sumB;
-    const aStr = `${a.ingredients?.[0]?.name || ''} + ${a.ingredients?.[1]?.name || ''}`;
-    const bStr = `${b.ingredients?.[0]?.name || ''} + ${b.ingredients?.[1]?.name || ''}`;
+    const aStr = `${(ia[0] && ia[0].name) ? ia[0].name : ''} + ${(ia[1] && ia[1].name) ? ia[1].name : ''}`;
+    const bStr = `${(ib[0] && ib[0].name) ? ib[0].name : ''} + ${(ib[1] && ib[1].name) ? ib[1].name : ''}`;
     return aStr.localeCompare(bStr);
   });
 }
 
 // ---------------- CLI ----------------
 
-function loadData(dataFile) {
-  if (!fs.existsSync(dataFile)) {
-    console.error(`Data file not found: ${dataFile}`);
-    process.exit(1);
+function loadDataAuto() {
+  function tryReadJSON(p) {
+    try {
+      const txt = fs.readFileSync(p, 'utf8');
+      const obj = JSON.parse(txt);
+      if (obj && Array.isArray(obj.items)) return { items: obj.items.map((it) => ({ ...it })), source: p };
+    } catch (e) {}
+    return null;
   }
-  const raw = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-  if (!raw || !Array.isArray(raw.items)) {
-    console.error('Invalid data format: expected { items: [] }');
-    process.exit(1);
+  function tryReadSEAAsset(key) {
+    try {
+      const sea = require('node:sea');
+      if (sea && typeof sea.isSea === 'function' && sea.isSea()) {
+        const txt = sea.getAsset(key, 'utf8');
+        if (txt) {
+          const obj = JSON.parse(txt);
+          if (obj && Array.isArray(obj.items)) return { items: obj.items.map((it) => ({ ...it })), source: 'embedded-asset' };
+        }
+      }
+    } catch (e) {}
+    return null;
   }
-  const items = raw.items.map((it) => ({ ...it }));
-  // Do not infer or override types here. Trust the data file.
-  return items;
+  const execDir = (process && process.execPath) ? path.dirname(process.execPath) : __dirname;
+  const candidates = [
+    path.resolve(execDir, 'sdfh_item_data.json'),
+    path.resolve(execDir, 'data', 'sdfh_item_data.json'),
+    path.resolve(__dirname, 'sdfh_item_data.json'),
+    path.resolve(__dirname, 'data', 'sdfh_item_data.json'),
+  ];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const found = tryReadJSON(candidates[i]);
+    if (found) return found;
+  }
+  // Fallbacks: try SEA asset first, then bundled require
+  const fromSEA = tryReadSEAAsset('sdfh_item_data.json');
+  if (fromSEA) return fromSEA;
+  try {
+    const embedded = require('./sdfh_item_data.json');
+    if (embedded && Array.isArray(embedded.items)) {
+      return { items: embedded.items.map((it) => ({ ...it })), source: 'embedded-require' };
+    }
+  } catch (e) {}
+  console.error('Data file not found: tried', candidates.join(', '));
+  process.exit(1);
 }
 
 function printHelp() {
@@ -564,15 +600,34 @@ function printHelp() {
   console.log('  help           Show this help');
   console.log('  quit / exit    Exit the app');
   console.log('  <query>        Search items by name (partial match, typo-tolerant)');
-  console.log('  Filters: append "r8" or "rank 8" or trailing number to constrain rank; prefix type, e.g., "katana r7"');
-  console.log('  --full         Show up to 50 suggestions instead of top 5');
+  console.log('');
+  console.log('Filters:');
+  console.log('  - Append rank: "r8" or "rank 8" or trailing number (e.g., "katana r7")');
+  console.log('  - Exact item name: "battle axe"; name + rank: "battle axe r7"');
+  console.log('');
+  console.log('Options:');
+  console.log('  --full                 Show up to 50 suggestions instead of top 5');
+  console.log('  --fuse [N]             Enter fusion mode. Optional N selects recipe index (1-based)');
+  console.log('  --recipe [N]           Same as --fuse [N]');
+  console.log('  --depth N              Alias of --fuse-rank N; leaves must be rank <= N');
+  console.log('  --fuse-rank N          Leaves must be rank <= N');
+  console.log('  --store N              Price analysis at store level N (1..5).');
+  console.log('                         With --store, totals table shows Price and Total price.');
+  console.log('                         With --depth and --store, items without prices are treated as owned');
+  console.log('');
+  console.log('Examples:');
+  console.log('  golden apple --fuse');
+  console.log('  golden apple --fuse 2');
+  console.log('  golden apple --fuse --depth 3');
+  console.log('  golden apple --fuse --store 3');
+  console.log('  golden apple --fuse --depth 3 --store 3');
 }
 
 function start() {
-  const DATA_FILE = path.resolve(__dirname, 'sdfh_item_data.json');
-  const items = loadData(DATA_FILE);
+  const loaded = loadDataAuto();
+  const items = loaded.items;
   const index = buildIndex(items);
-  console.log(`Loaded ${items.length} items from ${path.basename(DATA_FILE)}`);
+  console.log(`Loaded ${items.length} items from ${path.basename(loaded && loaded.source ? loaded.source : 'sdfh_item_data.json')}`);
   console.log('Type a name to search (partial allowed). Type "help" for help.');
 
   const rl = readline.createInterface({
