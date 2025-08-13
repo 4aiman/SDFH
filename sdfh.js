@@ -203,6 +203,163 @@ function search(index, rawQuery, limit = 5) {
   return { exact: [], suggestions: scored };
 }
 
+// ---------------- Fusion analysis ----------------
+
+function parseFlags(input) {
+  const flags = { recipeIndex: null, fuseRankLimit: null, full: false, doFuse: false };
+  const parts = input.split(/\s+/).filter(Boolean);
+  const kept = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    const p = parts[i];
+    if (/^--full$/i.test(p)) { flags.full = true; continue; }
+    if (/^--fuse$/i.test(p)) { flags.doFuse = true; continue; }
+    let m;
+    m = p.match(/^--fuse=(\d+)$/i);
+    if (m) { flags.doFuse = true; flags.recipeIndex = parseInt(m[1], 10); continue; }
+    if (/^--fuse$/i.test(p) && parts[i + 1] && /^\d+$/.test(parts[i + 1])) { flags.doFuse = true; flags.recipeIndex = parseInt(parts[i + 1], 10); i += 1; continue; }
+    m = p.match(/^--recipe=(\d+)$/i);
+    if (m) { flags.doFuse = true; flags.recipeIndex = parseInt(m[1], 10); continue; }
+    if (/^--recipe$/i.test(p) && parts[i + 1] && /^\d+$/.test(parts[i + 1])) { flags.doFuse = true; flags.recipeIndex = parseInt(parts[i + 1], 10); i += 1; continue; }
+    const mRank = p.match(/^--(?:fuse-rank)=(\d+)$/i)?.[1] || (p.match(/^--fuse-rank$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
+    if (mRank) { flags.fuseRankLimit = parseInt(mRank, 10); continue; }
+    const mDepthAsRank = p.match(/^--(?:depth)=(\d+)$/i)?.[1] || (p.match(/^--depth$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
+    if (mDepthAsRank) { flags.fuseRankLimit = parseInt(mDepthAsRank, 10); continue; }
+    kept.push(p);
+  }
+  return { flags, remaining: kept.join(' ') };
+}
+
+function getItemsByTypeAndRank(index, type, rank) {
+  const typeMap = index.typeRankMap.get(type);
+  if (!typeMap) return [];
+  return typeMap.get(rank) || [];
+}
+
+function getItemByExactName(index, name) {
+  return index.nameMap.get(normalize(name)) || null;
+}
+
+function expandIngredient(index, ingredient, opts, visited) {
+  const node = { name: ingredient.name, rank: ingredient.rank, children: [] };
+  if (opts.fuseRankLimit != null && ingredient.rank <= opts.fuseRankLimit) {
+    node.leaf = true;
+    return node;
+  }
+  const childItem = getItemByExactName(index, ingredient.name);
+  if (!childItem) {
+    node.leaf = true;
+    node.missing = true;
+    return node;
+  }
+  const key = `${childItem.name}|${childItem.rank}`;
+  if (visited.has(key)) {
+    node.leaf = true;
+    node.cycle = true;
+    return node;
+  }
+  visited.add(key);
+  const recipes = Array.isArray(childItem.recipes) ? childItem.recipes : [];
+  // If fuseRankLimit given, try to find any recipe that fully resolves to base items within limit
+  if (opts.fuseRankLimit != null) {
+    const ordered = sortRecipes(recipes);
+    for (const r of ordered) {
+      const left = expandIngredient(index, r.ingredients[0], opts, new Set(visited));
+      const right = expandIngredient(index, r.ingredients[1], opts, new Set(visited));
+      const ok = checkAllLeavesWithinRank([left, right], opts.fuseRankLimit);
+      if (ok) {
+        node.children.push(left, right);
+        node.recipe = { ingredients: r.ingredients };
+        visited.delete(key);
+        return node;
+      }
+    }
+    // fallback: just take first recipe one level
+    if (recipes[0]) {
+      const left = expandIngredient(index, recipes[0].ingredients[0], opts, new Set(visited));
+      const right = expandIngredient(index, recipes[0].ingredients[1], opts, new Set(visited));
+      node.children.push(left, right);
+      node.recipe = { ingredients: recipes[0].ingredients };
+    } else {
+      node.leaf = true;
+    }
+    visited.delete(key);
+    return node;
+  }
+  // depth-limited expansion (one level per call)
+  if (recipes[0]) {
+    const left = expandIngredient(index, recipes[0].ingredients[0], opts, new Set(visited));
+    const right = expandIngredient(index, recipes[0].ingredients[1], opts, new Set(visited));
+    node.children.push(left, right);
+    node.recipe = { ingredients: recipes[0].ingredients };
+  } else {
+    node.leaf = true;
+  }
+  visited.delete(key);
+  return node;
+}
+
+function checkAllLeavesWithinRank(nodes, limit) {
+  const stack = [...nodes];
+  while (stack.length) {
+    const n = stack.pop();
+    if (n.children && n.children.length) stack.push(...n.children);
+    else if (n.rank > limit) return false;
+  }
+  return true;
+}
+
+function printFusionTree(node, indent = '') {
+  if (!node) return [];
+  const lines = [];
+  const isEnd = (!node.children || node.children.length === 0) && !node.missing && !node.cycle;
+  const label = `${node.name} (R${node.rank})` + (node.missing ? ' [missing]' : node.cycle ? ' [cycle]' : isEnd ? ' [END]' : '');
+  lines.push(indent + label);
+  if (node.children && node.children.length) {
+    const ing = node.recipe ? node.recipe.ingredients.map((i) => `${i.name} (R${i.rank})`).join(' + ') : '';
+    if (ing) lines.push(indent + '  = ' + ing);
+    for (const child of node.children) {
+      lines.push(...printFusionTree(child, indent + '  '));
+    }
+  }
+  return lines;
+}
+
+function collectLeaves(node, out) {
+  if (!node) return;
+  if (node.children && node.children.length) {
+    for (const c of node.children) collectLeaves(c, out);
+  } else {
+    if (!node.missing && !node.cycle) out.push({ name: node.name, rank: node.rank });
+  }
+}
+
+function printTotalsTable(leaves) {
+  const map = new Map();
+  for (const l of leaves) {
+    const key = `${l.name}|${l.rank}`;
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  const rows = Array.from(map.entries()).map(([key, count]) => {
+    const [name, rankStr] = key.split('|');
+    return { count, name, rank: parseInt(rankStr, 10) };
+  }).sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  const h1 = 'Count', h2 = 'Item', h3 = 'Rank';
+  const w1 = Math.max(h1.length, ...rows.map(r => String(r.count).length), 1);
+  const w2 = Math.max(h2.length, ...rows.map(r => r.name.length), 4);
+  const w3 = Math.max(h3.length, ...rows.map(r => String(r.rank).length), 4);
+  const hr = `+${'-'.repeat(w1 + 2)}+${'-'.repeat(w2 + 2)}+${'-'.repeat(w3 + 2)}+`;
+  const header = `| ${h1.padEnd(w1)} | ${h2.padEnd(w2)} | ${h3.padEnd(w3)} |`;
+  const lines = [];
+  lines.push(hr);
+  lines.push(header);
+  lines.push(hr);
+  for (const r of rows) {
+    lines.push(`| ${String(r.count).padEnd(w1)} | ${r.name.padEnd(w2)} | ${String(r.rank).padEnd(w3)} |`);
+  }
+  lines.push(hr);
+  return lines;
+}
+
 function summarizeItem(item) {
   const lines = [];
   const typeLabel = item.type ? ` [${item.type}]` : '';
@@ -223,19 +380,7 @@ function summarizeItem(item) {
   const numRecipes = Array.isArray(item.recipes) ? item.recipes.length : 0;
   lines.push(`Recipes to create: ${numRecipes}`);
   if (numRecipes > 0) {
-    const sorted = [...item.recipes].sort((a, b) => {
-      const ra = (a.ingredients || []).map((x) => x.rank || 0);
-      const rb = (b.ingredients || []).map((x) => x.rank || 0);
-      const maxA = Math.max(...ra, 0);
-      const maxB = Math.max(...rb, 0);
-      if (maxA !== maxB) return maxA - maxB;
-      const sumA = ra.reduce((p, c) => p + c, 0);
-      const sumB = rb.reduce((p, c) => p + c, 0);
-      if (sumA !== sumB) return sumA - sumB;
-      const aStr = `${a.ingredients[0].name} + ${a.ingredients[1].name}`;
-      const bStr = `${b.ingredients[0].name} + ${b.ingredients[1].name}`;
-      return aStr.localeCompare(bStr);
-    });
+    const sorted = sortRecipes(item.recipes);
     const fmt = (ing) => `${ing.name}${ing.rank ? ` (R${ing.rank})` : ''}`;
     const col1 = 'Ingredient 1';
     const col2 = 'Ingredient 2';
@@ -252,6 +397,22 @@ function summarizeItem(item) {
     lines.push(hr);
   }
   return lines.join('\n');
+}
+
+function sortRecipes(recipes) {
+  return [...(recipes || [])].sort((a, b) => {
+    const ra = (a.ingredients || []).map((x) => x.rank || 0);
+    const rb = (b.ingredients || []).map((x) => x.rank || 0);
+    const maxA = Math.max(...ra, 0);
+    const maxB = Math.max(...rb, 0);
+    if (maxA !== maxB) return maxA - maxB;
+    const sumA = ra.reduce((p, c) => p + c, 0);
+    const sumB = rb.reduce((p, c) => p + c, 0);
+    if (sumA !== sumB) return sumA - sumB;
+    const aStr = `${a.ingredients?.[0]?.name || ''} + ${a.ingredients?.[1]?.name || ''}`;
+    const bStr = `${b.ingredients?.[0]?.name || ''} + ${b.ingredients?.[1]?.name || ''}`;
+    return aStr.localeCompare(bStr);
+  });
 }
 
 // ---------------- CLI ----------------
@@ -312,14 +473,67 @@ function start() {
       return;
     }
 
-    const showFull = /\s--full\b/i.test(input);
-    const queryOnly = input.replace(/\s--full\b/i, '').trim();
+    // Flags for fusion analysis
+    const { flags, remaining } = parseFlags(input);
+    const showFull = flags.full;
+    const queryOnly = remaining;
     const result = search(index, queryOnly, showFull ? 50 : 5);
     if (result.exact.length > 0) {
-      console.log(summarizeItem(result.exact[0]));
+      const item = result.exact[0];
+      if (flags.doFuse || flags.recipeIndex != null || flags.fuseRankLimit != null) {
+        const recipes = sortRecipes(Array.isArray(item.recipes) ? item.recipes : []);
+        const idx = Math.max(1, Math.min(flags.recipeIndex || 1, recipes.length)) - 1;
+        const recipe = recipes[idx];
+        if (!recipe) {
+          console.log(summarizeItem(item));
+        } else {
+          const visited = new Set();
+          const left = expandIngredient(index, recipe.ingredients[0], { fuseRankLimit: flags.fuseRankLimit }, visited);
+          const right = expandIngredient(index, recipe.ingredients[1], { fuseRankLimit: flags.fuseRankLimit }, visited);
+          console.log(`${item.name} (Rank ${item.rank})${item.type ? ` [${item.type}]` : ''}`);
+          console.log(`Recipe ${idx + 1}: ${recipe.ingredients.map((i) => `${i.name} (R${i.rank})`).join(' + ')}`);
+          const lines = [...printFusionTree(left), ...printFusionTree(right)];
+          lines.forEach((l) => console.log(l));
+          const leaves = [];
+          collectLeaves(left, leaves);
+          collectLeaves(right, leaves);
+          if (leaves.length) {
+            console.log('Totals:');
+            printTotalsTable(leaves).forEach((l) => console.log(l));
+          }
+        }
+      } else {
+        console.log(summarizeItem(item));
+      }
     } else if (result.suggestions.length > 0) {
       if (result.suggestions.length === 1) {
-        console.log(summarizeItem(result.suggestions[0].item));
+        const item = result.suggestions[0].item;
+        if (flags.doFuse || flags.recipeIndex != null || flags.fuseRankLimit != null) {
+          // Fusion analysis on the picked item
+          const recipes = sortRecipes(Array.isArray(item.recipes) ? item.recipes : []);
+          const idx = Math.max(1, Math.min(flags.recipeIndex || 1, recipes.length)) - 1; // default to first recipe
+          const recipe = recipes[idx];
+          if (!recipe) {
+            console.log(summarizeItem(item));
+          } else {
+            const visited = new Set();
+            const left = expandIngredient(index, recipe.ingredients[0], { fuseRankLimit: flags.fuseRankLimit }, visited);
+            const right = expandIngredient(index, recipe.ingredients[1], { fuseRankLimit: flags.fuseRankLimit }, visited);
+            console.log(`${item.name} (Rank ${item.rank})${item.type ? ` [${item.type}]` : ''}`);
+            console.log(`Recipe ${idx + 1}: ${recipe.ingredients.map((i) => `${i.name} (R${i.rank})`).join(' + ')}`);
+            const lines = [...printFusionTree(left), ...printFusionTree(right)];
+            lines.forEach((l) => console.log(l));
+            const leaves = [];
+            collectLeaves(left, leaves);
+            collectLeaves(right, leaves);
+            if (leaves.length) {
+              console.log('Totals:');
+              printTotalsTable(leaves).forEach((l) => console.log(l));
+            }
+          }
+        } else {
+          console.log(summarizeItem(item));
+        }
       } else {
         console.log('No exact match. Did you mean:');
         result.suggestions.forEach((s, i) => {
