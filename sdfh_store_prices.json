@@ -1,0 +1,232 @@
+{
+  "Short Sword": 750,
+  "Bokutoh": 720,
+  "Mumei": 1450,
+  "Dagger": 680,
+  "Short Bow": 1430,
+  "Stone Axe": 1220,
+  "Spear": 1090,
+  "Javelin": 1890,
+  "Leather Glove": 720,
+  "Rivet Knuckle": 1090,
+  "Oak Staff": 670,
+  "Stone Rod": 1110,
+  "Lead": 630,
+  "Copper": 1100,
+  "Cap": 460,
+  "Pointed Hat": 790,
+  "Cloth": 590,
+  "Toga": 540,
+  "Charm": 650,
+  "Power Mittens": 750,
+  "Oak Shoes": 670,
+  "Antidote": 520,
+  "Eyedrop": 520,
+  "Vigor Seed": 550,
+  "Badge of Courage": 780,
+  "Whistle": 780,
+  "Broad Sword": [
+    null,
+    1500
+  ],
+  "Ceramic Knife": [
+    null,
+    1020
+  ],
+  "Long Bow": [
+    null,
+    2210
+  ],
+  "Hand Axe": [
+    null,
+    2100
+  ],
+  "Leather Mail": [
+    null,
+    850
+  ],
+  "Clergy Robe": [
+    null,
+    800
+  ],
+  "Long Sword": [
+    null,
+    null,
+    2260
+  ],
+  "Rakuyo": [
+    null,
+    null,
+    2180
+  ],
+  "Assasin Knife": [
+    null,
+    null,
+    1360
+  ],
+  "Composite Bow": [
+    null,
+    null,
+    2990
+  ],
+  "Heavy Axe": [
+    null,
+    null,
+    2990
+  ],
+  "Halberd": [
+    null,
+    null,
+    2700
+  ],
+  "Iron Fang": [
+    null,
+    null,
+    1500
+  ],
+  "Iron Rod": [
+    null,
+    null,
+    1560
+  ],
+  "Bronze": [
+    null,
+    null,
+    1570
+  ],
+  "Ring Mail": [
+    null,
+    null,
+    1170
+  ],
+  "Mithril Coat": [
+    null,
+    null,
+    1090
+  ],
+  "Vigor Nut": [
+    null,
+    null,
+    1830
+  ],
+  "Cloth Helmet": [
+    null,
+    null,
+    null,
+    960
+  ],
+  "Feather Hat": [
+    null,
+    null,
+    null,
+    1110
+  ],
+  "Amulet": [
+    null,
+    null,
+    null,
+    1040
+  ],
+  "Talisman": [
+    null,
+    null,
+    null,
+    1040
+  ],
+  "Mermaid Pearls": [
+    null,
+    null,
+    null,
+    2620
+  ],
+  "Fur Boots": [
+    null,
+    null,
+    null,
+    940
+  ],
+  "Mithril Sword": [
+    null,
+    null,
+    null,
+    null,
+    3770
+  ],
+  "Akujiki": [
+    null,
+    null,
+    null,
+    null,
+    3640
+  ],
+  "Gladius": [
+    null,
+    null,
+    null,
+    null,
+    2040
+  ],
+  "Cursed Bow": [
+    null,
+    null,
+    null,
+    null,
+    4550
+  ],
+  "Battle Axe": [
+    null,
+    null,
+    null,
+    null,
+    4750
+  ],
+  "Steel Spear": [
+    null,
+    null,
+    null,
+    null,
+    4310
+  ],
+  "Iron Knuckle": [
+    null,
+    null,
+    null,
+    null,
+    2340
+  ],
+  "Dragon Staff": [
+    null,
+    null,
+    null,
+    null,
+    2440
+  ],
+  "Palladium": [
+    null,
+    null,
+    null,
+    null,
+    2500
+  ],
+  "Chain Mail": [
+    null,
+    null,
+    null,
+    null,
+    1950
+  ],
+  "Darkness Robe": [
+    null,
+    null,
+    null,
+    null,
+    1740
+  ],
+  "Herb": [
+    null,
+    null,
+    null,
+    null,
+    680
+  ]
+}
