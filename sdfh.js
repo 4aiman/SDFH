@@ -206,7 +206,7 @@ function search(index, rawQuery, limit = 5) {
 // ---------------- Fusion analysis ----------------
 
 function parseFlags(input) {
-  const flags = { recipeIndex: null, fuseRankLimit: null, full: false, doFuse: false };
+  const flags = { recipeIndex: null, fuseRankLimit: null, full: false, doFuse: false, storeLevel: null };
   const parts = input.split(/\s+/).filter(Boolean);
   const kept = [];
   for (let i = 0; i < parts.length; i += 1) {
@@ -224,6 +224,8 @@ function parseFlags(input) {
     if (mRank) { flags.fuseRankLimit = parseInt(mRank, 10); continue; }
     const mDepthAsRank = p.match(/^--(?:depth)=(\d+)$/i)?.[1] || (p.match(/^--depth$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
     if (mDepthAsRank) { flags.fuseRankLimit = parseInt(mDepthAsRank, 10); continue; }
+    const mStore = p.match(/^--store=(\d+)$/i)?.[1] || (p.match(/^--store$/i) && parts[i + 1] && /^\d+$/.test(parts[i + 1]) ? parts[++i] : null);
+    if (mStore) { flags.storeLevel = Math.max(1, Math.min(5, parseInt(mStore, 10))); continue; }
     kept.push(p);
   }
   return { flags, remaining: kept.join(' ') };
@@ -240,6 +242,12 @@ function getItemByExactName(index, name) {
 }
 
 function expandIngredient(index, ingredient, opts, visited) {
+  if (opts && typeof opts.nodeBudget === 'number') {
+    if (opts.nodeBudget <= 0) {
+      return { name: ingredient.name, rank: ingredient.rank, leaf: true, truncated: true, children: [] };
+    }
+    opts.nodeBudget -= 1;
+  }
   const node = { name: ingredient.name, rank: ingredient.rank, children: [] };
   if (opts.fuseRankLimit != null && ingredient.rank <= opts.fuseRankLimit) {
     node.leaf = true;
@@ -250,6 +258,14 @@ function expandIngredient(index, ingredient, opts, visited) {
     node.leaf = true;
     node.missing = true;
     return node;
+  }
+  // If store level provided and this ingredient is purchasable at that store, stop here
+  if (opts.storeLevel != null) {
+    const priceInfo = getPriceAtStore(childItem, opts.storeLevel);
+    if (priceInfo.purchasable) {
+      node.leaf = true;
+      return node;
+    }
   }
   const key = `${childItem.name}|${childItem.rank}`;
   if (visited.has(key)) {
@@ -285,6 +301,32 @@ function expandIngredient(index, ingredient, opts, visited) {
     visited.delete(key);
     return node;
   }
+  // If storeLevel given (and no fuseRankLimit), try to find any recipe that resolves to purchasable leaves
+  if (opts.storeLevel != null) {
+    const ordered = sortRecipes(recipes);
+    for (const r of ordered) {
+      const left = expandIngredient(index, r.ingredients[0], opts, new Set(visited));
+      const right = expandIngredient(index, r.ingredients[1], opts, new Set(visited));
+      const ok = checkAllLeavesPurchasable([left, right], index, opts.storeLevel);
+      if (ok) {
+        node.children.push(left, right);
+        node.recipe = { ingredients: r.ingredients };
+        visited.delete(key);
+        return node;
+      }
+    }
+    // fallback: first recipe
+    if (recipes[0]) {
+      const left = expandIngredient(index, recipes[0].ingredients[0], opts, new Set(visited));
+      const right = expandIngredient(index, recipes[0].ingredients[1], opts, new Set(visited));
+      node.children.push(left, right);
+      node.recipe = { ingredients: recipes[0].ingredients };
+    } else {
+      node.leaf = true;
+    }
+    visited.delete(key);
+    return node;
+  }
   // depth-limited expansion (one level per call)
   if (recipes[0]) {
     const left = expandIngredient(index, recipes[0].ingredients[0], opts, new Set(visited));
@@ -304,6 +346,21 @@ function checkAllLeavesWithinRank(nodes, limit) {
     const n = stack.pop();
     if (n.children && n.children.length) stack.push(...n.children);
     else if (n.rank > limit) return false;
+  }
+  return true;
+}
+
+function checkAllLeavesPurchasable(nodes, index, storeLevel) {
+  const stack = [...nodes];
+  while (stack.length) {
+    const n = stack.pop();
+    if (n.children && n.children.length) {
+      stack.push(...n.children);
+    } else {
+      const it = getItemByExactName(index, n.name);
+      const info = getPriceAtStore(it, storeLevel);
+      if (!info.purchasable) return false;
+    }
   }
   return true;
 }
@@ -356,6 +413,76 @@ function printTotalsTable(leaves) {
   for (const r of rows) {
     lines.push(`| ${String(r.count).padEnd(w1)} | ${r.name.padEnd(w2)} | ${String(r.rank).padEnd(w3)} |`);
   }
+  lines.push(hr);
+  return lines;
+}
+
+function getPriceAtStore(item, storeLevel) {
+  if (!item || storeLevel == null) return { purchasable: false, price: null };
+  const p = item.price;
+  if (p == null) return { purchasable: false, price: null };
+  if (typeof p === 'number') return { purchasable: true, price: p };
+  if (Array.isArray(p)) {
+    let last = null;
+    for (let s = 1; s <= storeLevel; s += 1) {
+      const idx = s - 1;
+      if (idx < p.length) {
+        const v = p[idx];
+        if (v != null) last = v;
+      }
+    }
+    if (last != null) return { purchasable: true, price: last };
+  }
+  return { purchasable: false, price: null };
+}
+
+function buildTotalsRowsWithPrice(leaves, index, storeLevel) {
+  const countMap = new Map();
+  for (const l of leaves) {
+    const key = `${l.name}|${l.rank}`;
+    countMap.set(key, (countMap.get(key) || 0) + 1);
+  }
+  const rows = [];
+  for (const [key, count] of countMap.entries()) {
+    const [name, rankStr] = key.split('|');
+    const item = getItemByExactName(index, name);
+    let unit = null;
+    let purch = false;
+    if (storeLevel != null) {
+      const res = getPriceAtStore(item, storeLevel);
+      unit = res.price;
+      purch = res.purchasable;
+    }
+    rows.push({ count, name, rank: parseInt(rankStr, 10), price: unit, purchasable: purch });
+  }
+  rows.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  return rows;
+}
+
+function printTotalsTableWithPrice(rows, fuseRankLimit) {
+  const h1 = 'Count', h2 = 'Item', h3 = 'Rank', h4 = 'Price';
+  const w1 = Math.max(h1.length, ...rows.map(r => String(r.count).length), 1);
+  const w2 = Math.max(h2.length, ...rows.map(r => r.name.length), 4);
+  const w3 = Math.max(h3.length, ...rows.map(r => String(r.rank).length), 4);
+  const priceStrs = rows.map(r => (r.price != null ? String(r.price) : '-'));
+  const w4 = Math.max(h4.length, ...priceStrs.map(s => s.length), 5);
+  const hr = `+${'-'.repeat(w1 + 2)}+${'-'.repeat(w2 + 2)}+${'-'.repeat(w3 + 2)}+${'-'.repeat(w4 + 2)}+`;
+  const header = `| ${h1.padEnd(w1)} | ${h2.padEnd(w2)} | ${h3.padEnd(w3)} | ${h4.padEnd(w4)} |`;
+  const lines = [];
+  lines.push(hr);
+  lines.push(header);
+  lines.push(hr);
+  let total = 0;
+  for (const r of rows) {
+    const priceDisplay = r.price != null ? String(r.price) : '-';
+    lines.push(`| ${String(r.count).padEnd(w1)} | ${r.name.padEnd(w2)} | ${String(r.rank).padEnd(w3)} | ${priceDisplay.padEnd(w4)} |`);
+    if (r.price != null) total += r.count * r.price;
+    else if (fuseRankLimit != null) total += 0; // treat as owned when depth/leaf rank is specified
+  }
+  lines.push(hr);
+  const footerLabel = 'Total price';
+  const footer = `| ${''.padEnd(w1)} | ${footerLabel.padEnd(w2)} | ${''.padEnd(w3)} | ${String(total).padEnd(w4)} |`;
+  lines.push(footer);
   lines.push(hr);
   return lines;
 }
@@ -488,8 +615,8 @@ function start() {
           console.log(summarizeItem(item));
         } else {
           const visited = new Set();
-          const left = expandIngredient(index, recipe.ingredients[0], { fuseRankLimit: flags.fuseRankLimit }, visited);
-          const right = expandIngredient(index, recipe.ingredients[1], { fuseRankLimit: flags.fuseRankLimit }, visited);
+          const left = expandIngredient(index, recipe.ingredients[0], { fuseRankLimit: flags.fuseRankLimit, storeLevel: flags.storeLevel, nodeBudget: 5000 }, visited);
+          const right = expandIngredient(index, recipe.ingredients[1], { fuseRankLimit: flags.fuseRankLimit, storeLevel: flags.storeLevel, nodeBudget: 5000 }, visited);
           console.log(`${item.name} (Rank ${item.rank})${item.type ? ` [${item.type}]` : ''}`);
           console.log(`Recipe ${idx + 1}: ${recipe.ingredients.map((i) => `${i.name} (R${i.rank})`).join(' + ')}`);
           const lines = [...printFusionTree(left), ...printFusionTree(right)];
@@ -499,7 +626,12 @@ function start() {
           collectLeaves(right, leaves);
           if (leaves.length) {
             console.log('Totals:');
-            printTotalsTable(leaves).forEach((l) => console.log(l));
+            if (flags.storeLevel != null) {
+              const rows = buildTotalsRowsWithPrice(leaves, index, flags.storeLevel);
+              printTotalsTableWithPrice(rows, flags.fuseRankLimit).forEach((l) => console.log(l));
+            } else {
+              printTotalsTable(leaves).forEach((l) => console.log(l));
+            }
           }
         }
       } else {
@@ -517,8 +649,8 @@ function start() {
             console.log(summarizeItem(item));
           } else {
             const visited = new Set();
-            const left = expandIngredient(index, recipe.ingredients[0], { fuseRankLimit: flags.fuseRankLimit }, visited);
-            const right = expandIngredient(index, recipe.ingredients[1], { fuseRankLimit: flags.fuseRankLimit }, visited);
+            const left = expandIngredient(index, recipe.ingredients[0], { fuseRankLimit: flags.fuseRankLimit, storeLevel: flags.storeLevel, nodeBudget: 5000 }, visited);
+            const right = expandIngredient(index, recipe.ingredients[1], { fuseRankLimit: flags.fuseRankLimit, storeLevel: flags.storeLevel, nodeBudget: 5000 }, visited);
             console.log(`${item.name} (Rank ${item.rank})${item.type ? ` [${item.type}]` : ''}`);
             console.log(`Recipe ${idx + 1}: ${recipe.ingredients.map((i) => `${i.name} (R${i.rank})`).join(' + ')}`);
             const lines = [...printFusionTree(left), ...printFusionTree(right)];
@@ -528,7 +660,12 @@ function start() {
             collectLeaves(right, leaves);
             if (leaves.length) {
               console.log('Totals:');
-              printTotalsTable(leaves).forEach((l) => console.log(l));
+              if (flags.storeLevel != null) {
+                const rows = buildTotalsRowsWithPrice(leaves, index, flags.storeLevel);
+                printTotalsTableWithPrice(rows, flags.fuseRankLimit).forEach((l) => console.log(l));
+              } else {
+                printTotalsTable(leaves).forEach((l) => console.log(l));
+              }
             }
           }
         } else {
